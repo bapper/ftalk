@@ -4,9 +4,10 @@
  */
 
 #define FTALK_NUM_SENSORS     3
-#define FTALK_EVENT_MIN_TIME  20 //number of milliseconds a press must last
+#define FTALK_EVENT_MIN_TIME  10   //number of milliseconds a press must last
 #define FTALK_EVENT_TASK_TIME (FTALK_EVENT_MIN_TIME + FTALK_EVENT_MIN_TIME/2)
-#define FTALK_LOOP_DELAY      5  //Delay between sensor reads, without delay it gets false zeros
+#define FTALK_LOOP_MSDELAY    1    //Delay between sensor reads, without delay it gets false zeros
+#define FTALK_LOOP_NSDELAY    500  //Delay between sensor reads, without delay it gets false zeros
 
 #define EVENT_TYPE_S1   1
 #define EVENT_TYPE_S2   2
@@ -26,7 +27,7 @@
  * threshold for when a press occured. There should probably be a calibration on boot.
  */
 int sensor_thresholds[FTALK_NUM_SENSORS] = {
-  130, 250, 5
+  5, 5, 5
 };
 
 /*
@@ -248,5 +249,6 @@ void setup()
 void loop()
 {
   read_sensors();
-  delay(5);
+  //delay(FTALK_LOOP_MSDELAY);
+  delayMicroseconds(FTALK_LOOP_NSDELAY);
 }
