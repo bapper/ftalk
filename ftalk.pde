@@ -3,24 +3,24 @@
  * Copyright (C) 2015 Brian Pomerantz
  */
 
+//#define DEBUG
+int printit = 0;
+
+#include "ftalk.h"
+
 #define FTALK_NUM_SENSORS     3
 #define FTALK_EVENT_MIN_TIME  10   //number of milliseconds a press must last
 #define FTALK_EVENT_TASK_TIME (FTALK_EVENT_MIN_TIME + FTALK_EVENT_MIN_TIME/2)
-#define FTALK_LOOP_MSDELAY    1    //Delay between sensor reads, without delay it gets false zeros
-#define FTALK_LOOP_NSDELAY    500  //Delay between sensor reads, without delay it gets false zeros
+#define FTALK_LOOP_MSDELAY    1    //Delay between sensor reads in milliseconds, without delay it gets false zeros, NOT USED RIGHT NOW
+#define FTALK_LOOP_NSDELAY    500  //Delay between sensor reads in nanoseconds, without delay it gets false zeros
+#define FTALK_GESTURE_TIMEOUT 1000 //Milliseconds between gestures, XXX: this should be tuned!
 
-#define EVENT_TYPE_S1   1
-#define EVENT_TYPE_S2   2
-#define EVENT_TYPE_S3   3
-#define EVENT_TYPE_S4   4
-#define EVENT_TYPE_S5   5
-#define EVENT_TYPE_S6   6
-#define EVENT_TYPE_S7   7
-#define EVENT_TYPE_S8   8
-#define EVENT_TYPE_S9   9
-#define EVENT_TYPE_S10  10
-
-//#define DEBUG
+/*
+ * Map of sensors to analog input ports.
+ */
+int sensor_input_map[FTALK_NUM_SENSORS] = {
+  A2, A3, A8
+};
 
 /*
  * XXX: I found the sensors started reading high without pressing them, I had to set a
@@ -50,17 +50,10 @@ struct sensor_input sensor_values[FTALK_NUM_SENSORS];
  */
 struct input_event {
   struct input_event  *next;
-  unsigned long       duration;
   unsigned long       start;
+  unsigned long       duration;
   unsigned int        value;
   int                 type;
-};
-
-/*
- * Map of sensors to analog input ports.
- */
-int sensor_input_map[FTALK_NUM_SENSORS] = {
-  A2, A3, A8
 };
 
 /*
@@ -69,12 +62,109 @@ int sensor_input_map[FTALK_NUM_SENSORS] = {
 struct event_list {
   struct input_event *first;
   struct input_event *last;
-} event_list = { NULL, NULL };
+  int                count;
+  unsigned long      last_time;
+} event_list = { NULL, NULL, 0 , 0};
+
+
+struct gesture_matches {
+  struct gesture_event  *first;
+  struct gesture_event  *last;
+  int count;
+};
+
+struct gesture_matches gesture_matches = { NULL, NULL, 0 };
+
+#define FTALK_GESTURES_LEN  (sizeof(gestures) / sizeof(struct gesture_event))
 
 /*
  * Task id for processing events.
  */
 int process_events_id;
+
+void reset_gestures(void)
+{
+  int i;
+
+  for (i=0; i < FTALK_GESTURES_LEN-1; i++) {
+    gestures[i].next = &gestures[i+1];
+  }
+  gestures[FTALK_GESTURES_LEN-1].next = NULL;
+  gesture_matches.first = &gestures[0];
+  gesture_matches.last = &gestures[FTALK_GESTURES_LEN-1];
+  gesture_matches.count = FTALK_GESTURES_LEN;
+}
+
+void free_events(void)
+{
+  while (event_list.first != NULL) {
+    struct input_event *cur;
+
+    cur = event_list.first;
+    event_list.first = cur->next;
+    free(cur);
+    event_list.count--;
+  }
+  event_list.last = NULL;
+}
+
+int match_gesture_event(struct input_event *iv, int num_matched)
+{
+  struct gesture_event  *gesture;
+  struct gesture_event  *prev;
+
+  gesture = gesture_matches.first;
+  prev = NULL;
+  while (gesture) {
+    if ((iv && (gesture->events[num_matched] == 0 || gesture->events[num_matched] != iv->type)) || 
+               (iv == NULL && gesture->events[num_matched] != 0))
+    {
+      /* drop the gesture from matches if it doesn't match */
+#ifdef DEBUG
+      Serial.print("Dropping ");
+      Serial.println(gesture->type);
+#endif
+      if (gesture_matches.first == gesture) {
+        gesture_matches.first = gesture->next;
+      } else {
+        prev->next = gesture->next;
+      }
+
+      if (gesture_matches.last == gesture) {
+        gesture_matches.last = NULL;
+      }
+      gesture_matches.count--;
+    } else {
+      /* Matched this time, keep track of this one */
+      prev = gesture;
+    }
+    gesture = gesture->next;
+  }
+
+  return gesture_matches.count;
+}
+
+void print_gesture_events(void)
+{
+  struct gesture_event  *gesture;
+
+  if (!gesture_matches.count) {
+    Serial.print(long(gesture_matches.first));
+    Serial.println("  No gestures matched!");
+    return;
+  }
+
+  Serial.print("Gestures matched -> ");
+  gesture = gesture_matches.first;
+  while (gesture) {
+    Serial.print(gesture->type);
+    gesture = gesture->next;
+    if (gesture != NULL) {
+      Serial.print(", ");
+    }
+  }
+  Serial.println(" ");
+}
 
 /*
  * Event processing task.
@@ -84,11 +174,36 @@ int process_events_id;
  */
 void process_events(int id, void *var)
 {
-  while (event_list.first != NULL) {
-    struct input_event *cur;
+  unsigned long now;
+  struct input_event *cur;
+  int i;
+  int num_matched = 0;
 
+  now = millis();
+  /* See if we should end the current round of gesture pruning and see if we have a match */
+  if (!event_list.last_time || (now - event_list.last_time < FTALK_GESTURE_TIMEOUT) || !event_list.count) {
+    if (printit) {
+      Serial.print("--- !");
+      Serial.print(event_list.last_time);
+      Serial.print(" || ");
+      Serial.print(now - event_list.last_time);
+      Serial.print(" < ");
+      Serial.print(FTALK_GESTURE_TIMEOUT);
+      Serial.print(" || !");
+      Serial.print(event_list.count);
+      Serial.println("---");
+    }
+    return;
+  }
+
+  if (!gesture_matches.first) {
+    reset_gestures();
+  }
+
+  while (event_list.first != NULL) {
     cur = event_list.first;
     event_list.first = cur->next;
+
     if (event_list.last == cur) {
       event_list.last = NULL;
     }
@@ -100,6 +215,9 @@ void process_events(int id, void *var)
       Serial.print(cur->type);
       Serial.print("   Duration=");
       Serial.println(cur->duration);
+
+      match_gesture_event(cur, num_matched);
+      num_matched++;
     }
 #ifdef DEBUG
     else {
@@ -112,7 +230,13 @@ void process_events(int id, void *var)
     }
 #endif
     free(cur);
+    event_list.count--;
   }
+
+  match_gesture_event(NULL, num_matched);
+  print_gesture_events();
+  event_list.last_time = 0;
+  reset_gestures();
 }
 
 /*
@@ -146,6 +270,9 @@ void add_input_event(struct input_event *new_event)
       event_list.last = new_event;
     }
   }
+
+  event_list.last_time = millis();
+  event_list.count++;
 }
 
 
@@ -158,16 +285,15 @@ unsigned long last_time = 0;
  */
 void read_sensors(void)
 {
-  unsigned long now;
   int i;
-  int printit = 0;
 
-  now = millis();
-  if (now > last_time+1000) {
-    last_time = now;
-#ifdef DEBUG
-    printit++;
-#endif
+  if (printit) {
+    Serial.print(event_list.count);
+    Serial.print("->");
+    Serial.print(event_list.last_time);
+    Serial.print("->");
+    Serial.print(long(event_list.first));
+    Serial.print("-> ");
   }
 
   /* Spin through the sensors and read their values */
@@ -194,7 +320,7 @@ void read_sensors(void)
       /* XXX: millis() overflows after 50 days, eventually need an algorithm here */
       new_event->duration = now - sensor_values[i].start;
       new_event->start = sensor_values[i].start;
-      new_event->type = i + 1; //i starts at 0, sensors start at 1
+      new_event->type = i + 1; //type PUSH, i starts at 0, sensors start at 1
       new_event->value = sensor_values[i].value; //last non-zero value read, probably won't need this
       new_event->next = NULL;
 
@@ -232,13 +358,13 @@ void read_sensors(void)
   }
 }
 
-
 void setup()
 {
   int i;
 
   Serial.begin(19200);
-  process_events_id = createTask(process_events, FTALK_EVENT_TASK_TIME, TASK_ENABLE, NULL);
+  //XXX: the task stopped runnning after a while, bug in base code?
+  //process_events_id = createTask(process_events, FTALK_EVENT_TASK_TIME, TASK_ENABLE, NULL);
   for (i=0; i < FTALK_NUM_SENSORS; i++) {
     sensor_values[i].threshold = sensor_thresholds[i];
     sensor_values[i].value = 0;
@@ -248,7 +374,17 @@ void setup()
 
 void loop()
 {
+#ifdef DEBUG
+  unsigned long now;
+  now = millis();
+  if (now > last_time+1000) {
+    last_time = now;
+    printit++;
+  }
+#endif
   read_sensors();
+  process_events(0, NULL);
   //delay(FTALK_LOOP_MSDELAY);
+  printit = 0;
   delayMicroseconds(FTALK_LOOP_NSDELAY);
 }
