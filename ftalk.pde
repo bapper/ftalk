@@ -82,6 +82,9 @@ struct gesture_matches gesture_matches = { NULL, NULL, 0 };
  */
 int process_events_id;
 
+/*
+ * Resets the gesture_matches structure, links all gestures together for pruning.
+ */
 void reset_gestures(void)
 {
   int i;
@@ -95,6 +98,10 @@ void reset_gestures(void)
   gesture_matches.count = FTALK_GESTURES_LEN;
 }
 
+/*
+ * XXX: Currently unused
+ * Frees all of the event_list events and resets the structure.
+ */
 void free_events(void)
 {
   while (event_list.first != NULL) {
@@ -108,6 +115,15 @@ void free_events(void)
   event_list.last = NULL;
 }
 
+/*
+ * Matches the input event iv to the remaining gestures in gesture_matches list at the
+ * events index num_matched.  If there is no match, the gesture is removed from the
+ * gesture_matches list.
+ *
+ * If iv is NULL, it is a special case to match the num_matched index to 0 (terminator in
+ * events list), if it isn't zero, then drop the gesture from the list.  This prunes any
+ * gestures that are not exact matches and have more input possibilites.
+ */
 int match_gesture_event(struct input_event *iv, int num_matched)
 {
   struct gesture_event  *gesture;
@@ -167,10 +183,11 @@ void print_gesture_events(void)
 }
 
 /*
- * Event processing task.
- *
- * XXX: should start pruning the gesture list here. There also needs to be timeout between
- * events to determine that a new guesture is to start.
+ * Event processing.  First determines if the time between the last press event and the
+ * current time has has surpassed the gesture timeout (FTALK_GESTURE_TIMEOUT) and there
+ * are press events in the queue.  If these are true, then it spins through each press
+ * event and eliminates those gestures that don't match with the press events.  Any
+ * remaining gestures should be exact matches to the press events.
  */
 void process_events(int id, void *var)
 {
@@ -196,18 +213,24 @@ void process_events(int id, void *var)
     return;
   }
 
+  /* Make sure the gestures are all linked up in a match list */
   if (!gesture_matches.first) {
     reset_gestures();
   }
 
+  /*
+   * input events are popped of the front and deleted as they matched to the gesture list
+   */
   while (event_list.first != NULL) {
     cur = event_list.first;
     event_list.first = cur->next;
 
+    /* last event, reset the last pointer */
     if (event_list.last == cur) {
       event_list.last = NULL;
     }
 
+    /* The event is long enough to count, proccess it */
     if (cur->duration > FTALK_EVENT_MIN_TIME) {
       Serial.print("Value=");
       Serial.print(cur->value);
@@ -220,6 +243,7 @@ void process_events(int id, void *var)
       num_matched++;
     }
 #ifdef DEBUG
+    /* The event is short, just pop it off and delete it */
     else {
       Serial.print("Too Short -- Value=");
       Serial.print(cur->value);
@@ -233,10 +257,11 @@ void process_events(int id, void *var)
     event_list.count--;
   }
 
+  /* prune any events that aren't at the end of their input list */
   match_gesture_event(NULL, num_matched);
   print_gesture_events();
   event_list.last_time = 0;
-  reset_gestures();
+  reset_gestures(); // Make sure the gestures are all linked up in a match list
 }
 
 /*
@@ -245,10 +270,12 @@ void process_events(int id, void *var)
 void add_input_event(struct input_event *new_event)
 {
   if (event_list.last == NULL) {
+    /* First event */
     event_list.first = new_event;
     event_list.last = new_event;
   } else {
     struct input_event *cur, *prev;
+
     cur = event_list.first;
     prev = NULL;
     while (cur) {
@@ -266,13 +293,14 @@ void add_input_event(struct input_event *new_event)
     }
 
     if (!cur) {
+      /* Last event to happen, add to the end */
       event_list.last->next = new_event;
       event_list.last = new_event;
     }
   }
 
-  event_list.last_time = millis();
-  event_list.count++;
+  event_list.last_time = millis(); //set the last time a press event happened
+  event_list.count++; //total events in the list
 }
 
 
